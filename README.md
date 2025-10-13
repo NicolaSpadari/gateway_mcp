@@ -1,234 +1,174 @@
 # MCP Gateway
 
-An MCP (Model Context Protocol) Gateway Server that routes and proxies requests to downstream MCP servers on-demand. This gateway minimizes context window usage by exposing only 3 generic tools (`discover`, `dispatch`, `close`) instead of loading all tools from all servers upfront.
+A lightweight MCP (Model Context Protocol) Gateway that routes requests to downstream MCP servers on-demand, solving context window saturation by exposing only 3 generic tools instead of loading all tools from all servers upfront.
 
-## 🎯 Purpose
+## Problem Solved
 
-The MCP Gateway solves the context window saturation problem when working with multiple MCP servers:
+**Without Gateway**: Each MCP server registers its tools with the client, consuming context tokens for every tool schema.
 
-- **Without Gateway**: Each MCP server's tools are registered in the client, consuming context tokens for all tool schemas
-- **With Gateway**: Only 3 gateway tools are registered, and downstream server tools are loaded on-demand
+**With Gateway**: Only 3 gateway tools are registered (`discover`, `dispatch`, `close`). Downstream server tools load on-demand.
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 Client (Claude Code/Cursor/etc)
     ↓
-MCP Gateway (this repo)
+MCP Gateway (3 tools only)
     ↓
-Downstream MCP Servers (loaded on-demand)
+Downstream Servers (loaded on-demand)
     - llm-memory
     - code-trm
     - codex
     - code-analysis
 ```
 
-## 🚀 Quick Start
-
-### Installation
+## Quick Start
 
 ```bash
-# Clone the repository
-git clone https://github.com/andreahaku/gateway_mcp.git
-cd gateway_mcp
-
 # Install dependencies
 npm install
 
-# Build the project
+# Build
 npm run build
-```
 
-### Usage
+# Run in production
+npm start
 
-#### Development Mode
-```bash
+# Or run in development mode
 npm run dev
 ```
 
-#### Production Mode
-```bash
-npm run build
-npm start
-```
+## Configuration
 
-## 🔧 Configuration
-
-The gateway is configured via `src/registry.ts`. Each downstream MCP server needs:
+Configure downstream servers in `src/registry.ts`:
 
 ```typescript
 {
-  id: "server-id",           // Unique identifier
-  kind: "stdio" | "ws",      // Connection type
-  command: "node",           // Command to run (for stdio)
-  args: ["path/to/server"],  // Arguments
-  connectTimeoutMs: 8000,    // Connection timeout
-  idleTtlMs: 300000,        // Idle time before disconnection (5 min)
+  id: "server-id",
+  kind: "stdio",              // Only "stdio" supported (not "ws")
+  command: "node",
+  args: ["/path/to/server"],
+  connectTimeoutMs: 8000,     // Optional
+  idleTtlMs: 300000,          // 5 min idle timeout (optional)
 }
 ```
 
-### Configured Servers
+## Gateway Tools
 
-The gateway currently includes these servers:
+### 1. `discover(serverId)`
+Returns metadata and tool schemas from a target server without registering them.
 
-1. **llm-memory** - Persistent memory for LLM tools
-2. **code-trm** - TRM-inspired recursive code refinement
-3. **codex** - Codex CLI integration
-4. **code-analysis** - Deep codebase analysis and pattern detection
+### 2. `dispatch(serverId, tool, args)`
+Invokes a tool on a target server. Use `discover` first to see available tools.
 
-## 🛠️ Tools
+### 3. `close(serverId)`
+Manually closes a server connection and evicts it from the cache.
 
-The gateway exposes 3 tools:
+## Usage Example
 
-### 1. `discover`
-Returns metadata and available tools from a target MCP server without registering them.
+```typescript
+// 1. Discover what tools are available
+discover({ serverId: "llm-memory" })
 
-```json
-{
-  "serverId": "llm-memory"
-}
+// 2. Call a tool with the correct arguments
+dispatch({
+  serverId: "llm-memory",
+  tool: "mem.upsert",
+  args: {
+    type: "note",
+    scope: "local",
+    text: "My note"
+  }
+})
+
+// 3. Optionally close the connection when done
+close({ serverId: "llm-memory" })
 ```
 
-### 2. `dispatch`
-Invokes a tool on a target MCP server. Use `discover` first to see available tools.
+## Connection Management
+
+- **On-demand loading**: Servers spawn only when first accessed
+- **Connection caching**: Active connections reused for performance
+- **Automatic cleanup**: Idle connections close after 5 minutes
+- **Timeout protection**: Tool calls timeout after 120 seconds
+
+## Environment Variables
+
+- `GATEWAY_LOG_LEVEL`: Controls logging verbosity
+  - `debug`: Verbose connection and operation logs
+  - `info`: Startup and errors only (default)
+  - `silent`: No logs
+
+## Adding a Custom Server
+
+1. Add configuration to `src/registry.ts`:
+   ```typescript
+   {
+     id: "my-server",
+     kind: "stdio",
+     command: "node",
+     args: ["/absolute/path/to/server.js"],
+     connectTimeoutMs: 8000,
+     idleTtlMs: 300000,
+   }
+   ```
+
+2. Ensure the downstream server is built:
+   ```bash
+   cd /path/to/downstream/server && npm run build
+   ```
+
+3. Rebuild and restart the gateway:
+   ```bash
+   npm run build
+   npm start
+   ```
+
+## Client Configuration
+
+Add to your MCP client configuration (e.g., Claude Code, Cursor):
 
 ```json
 {
-  "serverId": "llm-memory",
-  "tool": "mem_upsert",
-  "args": {
-    "type": "note",
-    "scope": "local",
-    "text": "Example note"
+  "mcpServers": {
+    "gateway": {
+      "command": "node",
+      "args": ["/path/to/gateway_mcp/dist/gateway.js"]
+    }
   }
 }
 ```
 
-### 3. `close`
-Closes and evicts a server connection from the gateway cache.
+See `mcp-config-example.json` for a complete example.
 
-```json
-{
-  "serverId": "llm-memory"
-}
-```
-
-## 📝 Workflow Example
-
-1. **Discover available servers**: Call `discover` with `serverId: "llm-memory"` to see what tools are available
-2. **Get tool schemas**: The discovery response includes full tool schemas
-3. **Call tools**: Use `dispatch` to invoke specific tools with the correct arguments
-4. **Clean up**: Optionally call `close` to disconnect idle servers
-
-## 🔄 Connection Management
-
-- **On-demand loading**: Servers are only started when first accessed
-- **Connection caching**: Active connections are reused for performance
-- **Automatic cleanup**: Idle connections are closed after `idleTtlMs` (default: 5 minutes)
-- **Graceful shutdown**: Properly terminates child processes on close
-
-## 🏛️ Project Structure
-
-```
-gateway_mcp/
-├── src/
-│   ├── gateway.ts    # Main gateway server implementation
-│   └── registry.ts   # Server configuration registry
-├── dist/             # Compiled JavaScript output
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
-## 📋 Requirements
+## Requirements
 
 - Node.js >= 18.0.0
 - TypeScript 5.x
 - @modelcontextprotocol/sdk ^1.20.0
 
-## 🔐 Security Considerations
+## Limitations
 
-- **Whitelist only**: Only servers in the registry can be accessed
-- **No dynamic loading**: Server configurations are static (not user-provided)
-- **Isolated environments**: Each server runs in its own process
-- **Timeout protection**: Connection attempts have configurable timeouts
+- **Stdio only**: WebSocket transport not yet implemented
+- **Static registry**: Server configurations are hardcoded (not dynamic)
+- **No rate limiting**: Add if exposing publicly
+- **No authentication**: Relies on process isolation
 
-## 🚧 Limitations
+## Documentation
 
-- WebSocket transport is not yet fully implemented (stdio only)
-- No built-in authentication/authorization (relies on process isolation)
-- No rate limiting (add if exposing publicly)
+- [Design Document](./docs/design.md) (Italian) - Original design rationale and architecture
+- [CLAUDE.md](./CLAUDE.md) - Development guide for Claude Code
+- [MCP Specification](https://modelcontextprotocol.io/specification/latest)
+- [MCP SDK Documentation](https://modelcontextprotocol.io/docs/develop/build-server)
 
-## 🤝 Contributing
+## Troubleshooting
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
+**Server won't connect**: Verify the path in `src/registry.ts` and ensure the downstream server is built.
 
-## 📜 License
+**Tools not found**: Use `discover` to list available tools and verify the tool name matches exactly.
+
+**High memory usage**: Reduce `idleTtlMs` or manually `close` servers when done.
+
+## License
 
 MIT
-
-## 📚 References
-
-- [Model Context Protocol Specification](https://modelcontextprotocol.io/specification/latest)
-- [MCP SDK Documentation](https://modelcontextprotocol.io/docs/develop/build-server)
-- [Design Document](./gateway_mcp.md) (Italian)
-
-## 💡 Advanced Usage
-
-### Adding Custom Servers
-
-1. Add your server configuration to `src/registry.ts`:
-
-```typescript
-{
-  id: "my-custom-server",
-  kind: "stdio",
-  command: "node",
-  args: ["/path/to/my/server.js"],
-  connectTimeoutMs: 8000,
-  idleTtlMs: 300000,
-}
-```
-
-2. Rebuild the gateway:
-
-```bash
-npm run build
-```
-
-3. Restart the gateway and use `discover` to verify the server is accessible
-
-### WebSocket Servers (Future)
-
-WebSocket transport will be supported in future versions:
-
-```typescript
-{
-  id: "remote-server",
-  kind: "ws",
-  url: "wss://example.com/mcp",
-  connectTimeoutMs: 8000,
-  idleTtlMs: 600000,
-}
-```
-
-## 🐛 Troubleshooting
-
-### Server Won't Connect
-
-1. Verify the server path is correct in `src/registry.ts`
-2. Ensure the downstream server is built (`npm run build` in its directory)
-3. Check server logs for startup errors
-4. Try running the server directly to test it works
-
-### Tools Not Found
-
-1. Use `discover` to list available tools
-2. Verify the tool name matches exactly
-3. Check the downstream server is properly configured
-
-### High Memory Usage
-
-1. Reduce `idleTtlMs` to close connections sooner
-2. Manually call `close` for servers you're done with
-3. Check for memory leaks in downstream servers

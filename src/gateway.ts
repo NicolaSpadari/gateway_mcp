@@ -3,11 +3,33 @@ import { z } from "zod";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import WebSocket from "ws";
 import { REGISTRY, type ServerConfig } from "./registry.js";
+
+// Logging configuration
+const LOG_LEVEL = process.env.GATEWAY_LOG_LEVEL || "info";
+const ENABLE_DEBUG = LOG_LEVEL === "debug";
+
+function logDebug(...args: any[]): void {
+  if (ENABLE_DEBUG) {
+    console.error("[gateway:debug]", ...args);
+  }
+}
+
+function logInfo(...args: any[]): void {
+  if (LOG_LEVEL !== "silent") {
+    console.error("[gateway:info]", ...args);
+  }
+}
+
+function logError(...args: any[]): void {
+  if (LOG_LEVEL !== "silent") {
+    console.error("[gateway:error]", ...args);
+  }
+}
 
 type Connected = {
   cfg: ServerConfig;
@@ -20,11 +42,18 @@ type Connected = {
 
 const connected = new Map<string, Connected>();
 
+type StdioTransportConfig = {
+  command: string;
+  args: string[];
+  stderr: "pipe" | "inherit" | "ignore";
+  env?: Record<string, string>;
+};
+
 async function connectStdio(cfg: ServerConfig): Promise<{ client: Client; child: ChildProcess | null }> {
-  console.error(`[gateway] Connecting to stdio server: ${cfg.command} ${cfg.args?.join(' ')}`);
+  logDebug(`Connecting to stdio server: ${cfg.command} ${cfg.args?.join(' ')}`);
 
   // StdioClientTransport spawns its own process, so we don't need to spawn manually
-  const transportConfig: any = {
+  const transportConfig: StdioTransportConfig = {
     command: assert(cfg.command, "command required"),
     args: cfg.args ?? [],
     stderr: "pipe"
@@ -43,37 +72,43 @@ async function connectStdio(cfg: ServerConfig): Promise<{ client: Client; child:
     capabilities: {}
   });
 
-  console.error(`[gateway] Connecting client to transport...`);
+  logDebug("Connecting client to transport...");
   await client.connect(transport);
-  console.error(`[gateway] Client connected successfully`);
+  logDebug("Client connected successfully");
 
   // We don't have direct access to the child process when using StdioClientTransport
   return { client, child: null };
 }
 
-async function connectWs(cfg: ServerConfig): Promise<Client> {
-  const ws = new WebSocket(assert(cfg.url, "url required for ws"));
-
-  await new Promise<void>((res, rej) => {
-    const to = setTimeout(
-      () => rej(new Error("WS connect timeout")),
-      cfg.connectTimeoutMs ?? 8000
-    );
-    ws.on("open", () => {
-      clearTimeout(to);
-      res();
-    });
-    ws.on("error", rej);
-  });
-
-  // For WebSocket, you'd need a WebSocketClientTransport
-  // This is a placeholder - actual implementation depends on SDK support
-  throw new Error("WebSocket transport not yet implemented");
+async function connectWs(_cfg: ServerConfig): Promise<Client> {
+  // WebSocket transport is not yet implemented
+  // Future implementation would use WebSocketClientTransport from the MCP SDK
+  // See: https://modelcontextprotocol.io/docs/develop/build-server
+  throw new Error("WebSocket transport is not supported in this version. Use stdio transport instead.");
 }
 
 function assert<T>(v: T | undefined, msg: string): T {
   if (v == null) throw new Error(msg);
   return v;
+}
+
+function safeCloseClient(client: Client): void {
+  try {
+    if (typeof client.close === 'function') {
+      client.close();
+    }
+  } catch (err) {
+    // Ignore close errors
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(errorMsg)), timeoutMs)
+    ),
+  ]);
 }
 
 function findCfg(serverId: string): ServerConfig {
@@ -91,27 +126,40 @@ async function ensureConnection(serverId: string): Promise<Connected> {
   }
 
   const cfg = findCfg(serverId);
-  let client: Client;
+  let client: Client | null = null;
   let child: ChildProcess | null = null;
 
-  if (cfg.kind === "ws") {
-    client = await connectWs(cfg);
-  } else {
-    const result = await connectStdio(cfg);
-    client = result.client;
-    child = result.child;
+  try {
+    if (cfg.kind === "ws") {
+      client = await connectWs(cfg);
+    } else {
+      const result = await connectStdio(cfg);
+      client = result.client;
+      child = result.child;
+    }
+
+    const conn: Connected = {
+      cfg,
+      client,
+      lastUsed: now,
+      idleTtlMs: cfg.idleTtlMs ?? 5 * 60_000,
+      child,
+    };
+
+    connected.set(serverId, conn);
+    return conn;
+  } catch (err) {
+    // Cleanup on connection failure
+    if (client) {
+      safeCloseClient(client);
+    }
+    if (child) {
+      try {
+        child.kill("SIGTERM");
+      } catch {}
+    }
+    throw err;
   }
-
-  const conn: Connected = {
-    cfg,
-    client,
-    lastUsed: now,
-    idleTtlMs: cfg.idleTtlMs ?? 5 * 60_000,
-    child,
-  };
-
-  connected.set(serverId, conn);
-  return conn;
 }
 
 function scheduleGc() {
@@ -119,10 +167,8 @@ function scheduleGc() {
     const now = Date.now();
     for (const [id, c] of connected) {
       if (now - c.lastUsed > c.idleTtlMs) {
-        // chiudi
-        try {
-          c.client.close();
-        } catch {}
+        // Close connection
+        safeCloseClient(c.client);
         try {
           c.child?.kill("SIGTERM");
         } catch {}
@@ -159,7 +205,7 @@ async function main() {
     }
   );
 
-  // Tool: discover -> ritorna metadati e tool summary del server target
+  // Tool: discover - returns metadata and tool summary from target server
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
       tools: [
@@ -223,35 +269,35 @@ async function main() {
     try {
       if (name === "discover") {
         const { serverId } = discoverInputSchema.parse(args);
-        console.error(`[gateway] Discovering serverId: ${serverId}`);
+        logDebug(`Discovering serverId: ${serverId}`);
 
         let conn;
         try {
           conn = await ensureConnection(serverId);
-          console.error(`[gateway] Connection established for ${serverId}`);
+          logDebug(`Connection established for ${serverId}`);
         } catch (err: any) {
-          console.error(`[gateway] Connection failed for ${serverId}:`, err.message);
+          logError(`Connection failed for ${serverId}:`, err.message);
           throw err;
         }
 
-        // Chiede al server target la lista tool/resources
+        // Request tool/resources list from target server
         let toolsList;
         try {
-          console.error(`[gateway] Calling listTools() on ${serverId}...`);
+          logDebug(`Calling listTools() on ${serverId}...`);
           toolsList = await conn.client.listTools();
-          console.error(`[gateway] listTools returned ${toolsList.tools?.length ?? 0} tools`);
+          logDebug(`listTools returned ${toolsList.tools?.length ?? 0} tools`);
         } catch (err: any) {
-          console.error(`[gateway] listTools failed for ${serverId}:`, err.message, err.code);
+          logError(`listTools failed for ${serverId}:`, err.message, err.code);
           throw err;
         }
 
         let resourcesList;
         try {
-          console.error(`[gateway] Calling listResources() on ${serverId}...`);
+          logDebug(`Calling listResources() on ${serverId}...`);
           resourcesList = await conn.client.listResources?.() ?? { resources: [] };
-          console.error(`[gateway] listResources returned ${resourcesList.resources?.length ?? 0} resources`);
+          logDebug(`listResources returned ${resourcesList.resources?.length ?? 0} resources`);
         } catch (err: any) {
-          console.error(`[gateway] listResources failed for ${serverId}:`, err.message);
+          logError(`listResources failed for ${serverId}:`, err.message);
           resourcesList = { resources: [] };
         }
 
@@ -275,8 +321,13 @@ async function main() {
         const { serverId, tool, args: toolArgs } = dispatchInputSchema.parse(args);
         const conn = await ensureConnection(serverId);
 
-        // Esegue direttamente la call tool → response content del server remoto
-        const result = await conn.client.callTool({ name: tool, arguments: toolArgs ?? {} });
+        // Execute tool call directly and return response content from remote server
+        // Add timeout protection (2 minutes default)
+        const result = await withTimeout(
+          conn.client.callTool({ name: tool, arguments: toolArgs ?? {} }),
+          120_000,
+          `Tool call '${tool}' on server '${serverId}' timed out after 120 seconds`
+        );
 
         return {
           content: Array.isArray(result.content)
@@ -295,9 +346,7 @@ async function main() {
           };
         }
 
-        try {
-          c.client.close();
-        } catch {}
+        safeCloseClient(c.client);
         try {
           c.child?.kill("SIGTERM");
         } catch {}
@@ -328,10 +377,11 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error("MCP Gateway Server running on stdio");
+  logInfo("MCP Gateway Server running on stdio");
+  logInfo(`Log level: ${LOG_LEVEL}. Set GATEWAY_LOG_LEVEL=debug for detailed logs or GATEWAY_LOG_LEVEL=silent to disable.`);
 }
 
 main().catch((err) => {
-  console.error(err);
+  logError("Fatal error:", err);
   process.exit(1);
 });

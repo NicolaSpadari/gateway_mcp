@@ -22,7 +22,40 @@ Downstream Servers (loaded on-demand)
     - code-analysis
 ```
 
-## Quick Start
+## Automated Installation (Recommended)
+
+The easiest way to install the gateway and optional downstream MCP servers:
+
+```bash
+./install.sh
+```
+
+This script will:
+1. Build the gateway
+2. Configure Claude Code to use the gateway
+3. Check for available MCP servers in the parent directory
+4. Offer to clone, install, and configure any missing servers:
+   - llm_memory_mcp
+   - codex_mcp
+   - code-analysis-context-mcp
+   - code_trm_mcp
+   - code_trm_python_mcp
+   - code-analysis-context-python-mcp
+   - poeditor_mcp
+
+After installation, restart Claude Code to load the gateway.
+
+### Uninstall
+
+To remove the gateway from Claude Code configuration:
+
+```bash
+./uninstall.sh
+```
+
+**Note**: This only removes the gateway from Claude Code config. The gateway directory and downstream servers remain untouched.
+
+## Manual Installation
 
 ```bash
 # Install dependencies

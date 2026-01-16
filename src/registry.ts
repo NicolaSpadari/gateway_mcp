@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type ServerKind = "stdio" | "ws";
+export type ServerKind = "stdio" | "ws" | "http" | "sse";
 
 export type ServerConfig = {
   id: string;
@@ -12,8 +12,10 @@ export type ServerConfig = {
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
-  // Per WebSocket
+  // Per server remoti (http, sse, ws)
   url?: string;
+  // Flag opzionale per indicare server remoto (inferito da "kind" se non impostato)
+  remote?: boolean;
   // Timeout/limiti
   connectTimeoutMs?: number;
   idleTtlMs?: number; // tempo dopo cui chiudere se inattivo

@@ -6,7 +6,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import type { ChildProcess } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import WebSocket from "ws";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { REGISTRY, type ServerConfig } from "./registry.js";
 
 // Logging configuration
@@ -87,6 +88,41 @@ async function connectWs(_cfg: ServerConfig): Promise<Client> {
   throw new Error("WebSocket transport is not supported in this version. Use stdio transport instead.");
 }
 
+async function connectHttp(cfg: ServerConfig, forceSSE = false): Promise<Client> {
+  const url = assert(cfg.url, "url required for http/sse transport");
+  logDebug(`Connecting to remote server: ${url} (forceSSE: ${forceSSE})`);
+
+  const baseUrl = new URL(url);
+
+  // If not forcing SSE, try Streamable HTTP first (recommended)
+  if (!forceSSE) {
+    try {
+      const client = new Client(
+        { name: "mcp-gateway-client", version: "1.0.0" },
+        { capabilities: {} }
+      );
+      const transport = new StreamableHTTPClientTransport(baseUrl);
+      // Type assertion needed due to exactOptionalPropertyTypes incompatibility with SDK
+      await client.connect(transport as Parameters<typeof client.connect>[0]);
+      logDebug(`Connected to ${cfg.id} using Streamable HTTP transport`);
+      return client;
+    } catch (err) {
+      logDebug(`Streamable HTTP failed for ${cfg.id}, falling back to SSE: ${(err as Error).message}`);
+    }
+  }
+
+  // Fallback to SSE transport (for older servers or when forced)
+  const client = new Client(
+    { name: "mcp-gateway-client", version: "1.0.0" },
+    { capabilities: {} }
+  );
+  const transport = new SSEClientTransport(baseUrl);
+  // Type assertion needed due to exactOptionalPropertyTypes incompatibility with SDK
+  await client.connect(transport as Parameters<typeof client.connect>[0]);
+  logDebug(`Connected to ${cfg.id} using SSE transport`);
+  return client;
+}
+
 function assert<T>(v: T | undefined, msg: string): T {
   if (v == null) throw new Error(msg);
   return v;
@@ -132,7 +168,14 @@ async function ensureConnection(serverId: string): Promise<Connected> {
   try {
     if (cfg.kind === "ws") {
       client = await connectWs(cfg);
+    } else if (cfg.kind === "http") {
+      // Streamable HTTP with SSE fallback
+      client = await connectHttp(cfg, false);
+    } else if (cfg.kind === "sse") {
+      // Force SSE transport (for servers that only support SSE)
+      client = await connectHttp(cfg, true);
     } else {
+      // Default: stdio
       const result = await connectStdio(cfg);
       client = result.client;
       child = result.child;

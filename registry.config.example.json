@@ -30,5 +30,21 @@
     "args": ["/path/to/code-analysis-context-mcp/dist/index.js"],
     "connectTimeoutMs": 8000,
     "idleTtlMs": 300000
+  },
+  {
+    "id": "nuxt-ui-remote",
+    "kind": "http",
+    "url": "https://ui.nuxt.com/mcp",
+    "remote": true,
+    "connectTimeoutMs": 10000,
+    "idleTtlMs": 600000
+  },
+  {
+    "id": "example-sse-server",
+    "kind": "sse",
+    "url": "https://example.com/mcp/sse",
+    "remote": true,
+    "connectTimeoutMs": 10000,
+    "idleTtlMs": 300000
   }
 ]
